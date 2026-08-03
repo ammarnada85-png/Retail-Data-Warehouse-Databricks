@@ -1,0 +1,80 @@
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+
+# ----------------------------------------------------
+# 1. تنظيف وإزالة تكرار جدول العملاء (crm_cust_info)
+# ----------------------------------------------------
+window_cust = Window.partitionBy("cst_id").orderBy(F.col("cst_create_date").desc())
+
+df_silver_cust = spark.table("retail_dwh.bronze.crm_cust_info") \
+    .filter(F.col("cst_id").isNotNull()) \
+    .withColumn("row_num", F.row_number().over(window_cust)) \
+    .filter(F.col("row_num") == 1).drop("row_num") \
+    .withColumn("cst_name", F.trim(F.concat_ws(" ", F.col("cst_firstname"), F.col("cst_lastname")))) \
+    .withColumn("cst_gndr", F.when(F.trim(F.col("cst_gndr")).isin(["M", "Male"]), "Male")
+                           .when(F.trim(F.col("cst_gndr")).isin(["F", "Female"]), "Female")
+                           .otherwise("n-a")) \
+    .withColumn("dwh_create_date", F.current_timestamp())
+
+df_silver_cust.write.format("delta").mode("overwrite").saveAsTable("retail_dwh.silver.crm_cust_info")
+
+# ----------------------------------------------------
+# 2. تنظيف أسعار المنتجات (crm_prd_info)
+# ----------------------------------------------------
+df_silver_prd = spark.table("retail_dwh.bronze.crm_prd_info") \
+    .withColumn("prd_id", F.trim(F.col("prd_id"))) \
+    .withColumn("prd_cost", F.coalesce(F.col("prd_cost").cast("decimal(18,2)"), F.lit(0.00))) \
+    .withColumn("prd_line", F.initcap(F.trim(F.col("prd_line")))) \
+    .withColumn("dwh_create_date", F.current_timestamp())
+
+df_silver_prd.write.format("delta").mode("overwrite").saveAsTable("retail_dwh.silver.crm_prd_info")
+
+# ----------------------------------------------------
+# 3. تصحيح عمليات وحسابات المبيعات (crm_sales_details)
+# ----------------------------------------------------
+df_silver_sales = spark.table("retail_dwh.bronze.crm_sales_details") \
+    .withColumn("sls_order_dt", F.try_to_date(F.col("sls_order_dt"), "yyyyMMdd")) \
+    .withColumn("sls_quantity", F.col("sls_quantity").cast("int")) \
+    .withColumn("sls_price", F.col("sls_price").cast("decimal(18,2)")) \
+    .withColumn("sls_sales", F.col("sls_quantity") * F.col("sls_price")) \
+    .withColumn("dwh_create_date", F.current_timestamp())
+
+df_silver_sales.write.format("delta").mode("overwrite").saveAsTable("retail_dwh.silver.crm_sales_details")
+
+# ----------------------------------------------------
+# 4. معالجة عملاء الـ ERP وإزالة البادئة الخاطئة 'NAS'
+# تم تصحيح المسميات إلى BDATE و GEN لبناء الأعمدة النظيفة
+# ----------------------------------------------------
+df_silver_erp_cust = spark.table("retail_dwh.bronze.erp_cust_az12") \
+    .withColumn("cid", F.when(F.col("cid").startswith("NAS"), F.expr("substring(cid, 4)"))
+                        .otherwise(F.col("cid"))) \
+    .withColumn("birthdate", F.try_to_date(F.col("BDATE"), "yyyy-MM-dd")) \
+    .withColumn("gender", F.when(F.trim(F.col("GEN")).isin(["M", "Male"]), "Male")
+                           .when(F.trim(F.col("GEN")).isin(["F", "Female"]), "Female")
+                           .otherwise("n-a")) \
+    .withColumn("dwh_create_date", F.current_timestamp())
+
+df_silver_erp_cust.write.format("delta").mode("overwrite").saveAsTable("retail_dwh.silver.erp_cust_az12")
+
+# ----------------------------------------------------
+# 5. ضبط مسميات فئات المنتجات (erp_px_cat_g1v2)
+# ----------------------------------------------------
+df_silver_erp_cat = spark.table("retail_dwh.bronze.erp_px_cat_g1v2") \
+    .withColumn("id", F.trim(F.col("id"))) \
+    .withColumn("cat", F.upper(F.trim(F.col("cat")))) \
+    .withColumn("subcat", F.upper(F.trim(F.col("subcat")))) \
+    .withColumn("dwh_create_date", F.current_timestamp())
+
+df_silver_erp_cat.write.format("delta").mode("overwrite").saveAsTable("retail_dwh.silver.erp_px_cat_g1v2")
+
+# ----------------------------------------------------
+# 6. تنظيف بيانات المواقع الجغرافية (erp_loc_a101)
+# ----------------------------------------------------
+df_silver_erp_loc = spark.table("retail_dwh.bronze.erp_loc_a101") \
+    .withColumn("cid", F.trim(F.col("cid"))) \
+    .withColumn("cntry", F.initcap(F.trim(F.col("cntry")))) \
+    .withColumn("dwh_create_date", F.current_timestamp())
+
+df_silver_erp_loc.write.format("delta").mode("overwrite").saveAsTable("retail_dwh.silver.erp_loc_a101")
+
+print("✨ مبروك! تم الانتهاء من تنظيف وحفظ جداول السيلفر الستة بنجاح.")
