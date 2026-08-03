@@ -1,0 +1,25 @@
+import os
+
+volume_path = "/Volumes/retail_dwh/bronze/raw_files/"
+
+try:
+    # قراءة الملفات من المجلد بعد رفعهما بنجاح
+    uploaded_files = os.listdir(volume_path)
+    print(f"📂 تم العثور على الملفات التالية: {uploaded_files}\n")
+    
+    for file_name in uploaded_files:
+        if file_name.lower().endswith(".csv"):
+            base_name = file_name.replace(".csv", "").replace(".CSV", "").lower()
+            
+            # تسمية الجداول حسب مصدرها
+            table_name = f"crm_{base_name}" if base_name in ["cust_info", "prd_info", "sales_details"] else f"erp_{base_name}"
+            
+            # قراءة وحفظ في البرونز
+            df_raw = spark.read.format("csv").option("header", "true").option("inferSchema", "false").load(f"{volume_path}{file_name}")
+            df_raw.write.format("delta").mode("overwrite").saveAsTable(f"retail_dwh.bronze.{table_name}")
+            
+            count = spark.table(f"retail_dwh.bronze.{table_name}").count()
+            print(f"✅ نجح استيراد: {file_name} -> bronze.{table_name} (عدد السجلات: {count})")
+
+except Exception as e:
+    print(f"❌ حدث خطأ: {str(e)}")
